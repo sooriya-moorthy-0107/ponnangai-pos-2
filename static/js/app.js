@@ -45,6 +45,111 @@ async function addToCart(productId, productName, productPrice, maxStock, product
     renderCart();
 }
 
+// In-place DOM stock reduction without destroying/reloading catalog
+function updateStockInDOM(soldItems) {
+    if (!soldItems || !soldItems.length) return;
+    soldItems.forEach(item => {
+        const card = document.querySelector(`.product-card[data-product-id="${item.id}"]`);
+        if (card) {
+            let currentStock = parseFloat(card.dataset.stock) || 0;
+            let newStock = Math.max(0, currentStock - (parseFloat(item.qty) || 1));
+            card.dataset.stock = newStock;
+            
+            const stockEl = card.querySelector('.product-stock-display');
+            if (stockEl) {
+                if (newStock <= 0) {
+                    stockEl.textContent = 'Out of Stock';
+                    stockEl.style.color = '#E53E3E';
+                    card.classList.add('out-of-stock-card');
+                    card.style.opacity = '0.65';
+                    card.style.cursor = 'not-allowed';
+                    card.onclick = null;
+                    const addBtn = card.querySelector('button');
+                    if (addBtn) {
+                        addBtn.disabled = true;
+                        addBtn.className = 'btn btn-secondary btn-small';
+                        addBtn.textContent = 'Out of Stock';
+                        addBtn.onclick = null;
+                    }
+                } else if (newStock <= 5) {
+                    stockEl.textContent = `Only ${newStock} left!`;
+                    stockEl.style.color = 'var(--destructive)';
+                    stockEl.style.fontWeight = 'bold';
+                } else {
+                    stockEl.textContent = `Stock: ${newStock}`;
+                    stockEl.style.color = '#4A5568';
+                    stockEl.style.fontWeight = 'normal';
+                }
+            }
+        }
+    });
+}
+
+// Prepend created bill to history sidebar instantly (0ms)
+function prependBillToHistory(bill) {
+    const container = document.getElementById('bill-history-container');
+    if (!container) return;
+
+    if (container.textContent.includes('No recent bills') || container.textContent.includes('Loading...')) {
+        container.innerHTML = '';
+    }
+
+    const card = document.createElement('div');
+    card.className = 'history-card';
+    card.id = `history-bill-${bill.id}`;
+    
+    let itemsHtml = '';
+    if (bill.items && bill.items.length > 0) {
+        itemsHtml = `
+            <div style="margin-top: 8px; border: 1px solid #E2E8F0; border-radius: 4px; overflow: hidden;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 11px;">
+                    <thead style="background-color: #EDF2F7; color: #4A5568;">
+                        <tr>
+                            <th style="padding: 4px 6px; text-align: left; border-bottom: 1px solid #E2E8F0;">Items</th>
+                            <th style="padding: 4px 6px; text-align: center; border-bottom: 1px solid #E2E8F0;">Qty</th>
+                            <th style="padding: 4px 6px; text-align: right; border-bottom: 1px solid #E2E8F0;">Rate</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+        bill.items.forEach(item => {
+            itemsHtml += `
+                <tr style="border-bottom: 1px solid #EDF2F7;">
+                    <td style="padding: 4px 6px; font-weight: 500;">${escapeHTML(item.name)}</td>
+                    <td style="padding: 4px 6px; text-align: center;">${item.quantity}</td>
+                    <td style="padding: 4px 6px; text-align: right;">₹${item.price.toFixed(2)}</td>
+                </tr>
+            `;
+        });
+        itemsHtml += `
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+
+    card.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px;">
+            <div>
+                <span style="font-weight: 800; font-size: 14px; color: var(--primary);">Bill #${bill.bill_number || bill.id}</span>
+                <span style="font-size: 11px; color: #718096; margin-left: 6px;">${bill.timestamp}</span>
+            </div>
+            <div style="text-align: right;">
+                <div style="font-size: 14px; font-weight: 800; color: #2D3748;">₹${bill.final_amount.toFixed(2)}</div>
+                <div style="font-size: 10px; color: #718096; text-transform: uppercase;">${bill.payment_mode}</div>
+            </div>
+        </div>
+        ${itemsHtml}
+        <div style="display: flex; gap: 8px; margin-top: 10px;">
+            <button class="btn btn-secondary btn-small" style="flex: 1; padding: 4px 8px; font-size: 11px;" onclick="handlePrintFlow(${bill.id})">Reprint</button>
+            <button class="btn btn-secondary btn-small" style="flex: 1; padding: 4px 8px; font-size: 11px;" onclick="revertBillFromHistory(${bill.id}, ${bill.bill_number || bill.id})">Edit</button>
+            <button class="btn btn-destructive btn-small" style="flex: 1; padding: 4px 8px; font-size: 11px;" onclick="cancelBillFromHistory(${bill.id}, ${bill.bill_number || bill.id})">Cancel</button>
+        </div>
+    `;
+
+    container.insertBefore(card, container.firstChild);
+}
+
 function updatePackaging(id, newPkg) {
     const item = cart.find(i => i.id === id);
     if (!item) return;
@@ -160,11 +265,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
+let isSubmittingBill = false;
 async function submitBill() {
+    if (isSubmittingBill) return;
     if (cart.length === 0) {
         await Swal.fire("Cart is empty!");
         return;
     }
+
+    const submitBtn = document.getElementById('submit-bill-btn');
+    const originalText = submitBtn ? submitBtn.innerHTML : '';
 
     const discount = parseFloat(document.getElementById('discount-input').value) || 0;
     const paymentMode = document.getElementById('payment-mode').value;
@@ -177,6 +287,13 @@ async function submitBill() {
     };
 
     try {
+        isSubmittingBill = true;
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.style.opacity = '0.6';
+            submitBtn.innerHTML = '⏳ Processing Bill...';
+        }
+
         const response = await fetch('/api/bills', {
             method: 'POST',
             headers: {
@@ -188,26 +305,38 @@ async function submitBill() {
         const data = await response.json();
 
         if (response.ok) {
+            const soldItems = [...cart];
             // Clear cart & reset UI
             cart = [];
             renderCart();
             const discountInput = document.getElementById('discount-input');
             if (discountInput) discountInput.value = 0;
 
-            // Refresh catalog dynamically immediately
-            refreshProductCatalog();
+            // Instant in-place DOM stock reduction (0ms, no network refetch, no DOM destruction)
+            updateStockInDOM(soldItems);
 
-            // Refresh bill history sidebar
-            fetchBillHistory();
+            // Prepend new bill to history sidebar
+            if (data.bill) {
+                prependBillToHistory(data.bill);
+            } else {
+                fetchBillHistory();
+            }
 
-            // Trigger persistent modal receipt check & automatic printing
-            handlePrintFlow(data.bill_id);
+            // Immediately trigger receipt display / auto-print (0ms latency with preloaded data!)
+            handlePrintFlow(data.bill_id, data.bill);
         } else {
             await Swal.fire(data.detail || "Failed to create bill");
         }
     } catch (err) {
         await Swal.fire("Error connecting to server.");
         console.error(err);
+    } finally {
+        isSubmittingBill = false;
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.style.opacity = '1';
+            submitBtn.innerHTML = originalText || 'Confirm & Print Bill';
+        }
     }
 }
 
@@ -401,9 +530,12 @@ function renderProducts(productsList) {
 
     productsList.forEach(product => {
         const card = document.createElement('div');
-
-        // Escape quotes & backslashes for safe function argument passing in onclick
         const escapedName = product.name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+
+        card.dataset.productId = product.id;
+        card.dataset.productName = product.name.toLowerCase();
+        card.dataset.stock = product.stock;
+        card.dataset.price = product.price;
 
         if (product.stock > 0) {
             card.className = 'product-card';
@@ -411,12 +543,12 @@ function renderProducts(productsList) {
             card.setAttribute('onclick', `openProductPopup(${product.id}, '${escapedName}', ${product.price}, ${product.stock}, '${product.product_type || 'solid'}', '${product.unit || 'Pcs'}', '${product.image_filename || ''}')`);
 
             const imageHtml = product.image_filename
-                ? `<img src="/photos/${product.image_filename}" alt="${escapeHTML(product.name)}" class="product-image">`
+                ? `<img src="/photos/${encodeURIComponent(product.image_filename)}" loading="lazy" decoding="async" onerror="this.onerror=null;this.src='/static/images/no-image.png'" alt="${escapeHTML(product.name)}" class="product-image">`
                 : `<div class="product-image" style="display: flex; align-items: center; justify-content: center; color: #A0AEC0; font-size: 12px;">No Image</div>`;
 
             const stockHtml = product.stock <= 5
-                ? `<div style="font-size: 10px; color: var(--destructive); margin-bottom: 4px; font-weight: bold;">Only ${product.stock} left!</div>`
-                : `<div style="font-size: 10px; color: #4A5568; margin-bottom: 4px;">Stock: ${product.stock}</div>`;
+                ? `<div class="product-stock-display" style="font-size: 10px; color: var(--destructive); margin-bottom: 4px; font-weight: bold;">Only ${product.stock} left!</div>`
+                : `<div class="product-stock-display" style="font-size: 10px; color: #4A5568; margin-bottom: 4px;">Stock: ${product.stock}</div>`;
 
             card.innerHTML = `
                 ${imageHtml}
@@ -432,7 +564,7 @@ function renderProducts(productsList) {
             card.style.position = 'relative';
 
             const imageHtml = product.image_filename
-                ? `<img src="/photos/${product.image_filename}" alt="${escapeHTML(product.name)}" class="product-image" style="filter: grayscale(100%);">`
+                ? `<img src="/photos/${encodeURIComponent(product.image_filename)}" loading="lazy" decoding="async" onerror="this.onerror=null;this.src='/static/images/no-image.png'" alt="${escapeHTML(product.name)}" class="product-image" style="filter: grayscale(100%);">`
                 : `<div class="product-image" style="display: flex; align-items: center; justify-content: center; color: #A0AEC0; font-size: 12px;">No Image</div>`;
 
             card.innerHTML = `
@@ -440,8 +572,8 @@ function renderProducts(productsList) {
                 ${imageHtml}
                 <div class="product-name">${escapeHTML(product.name)}</div>
                 <div class="product-price">₹${product.price.toFixed(2)}</div>
-                <div style="font-size: 10px; color: #E53E3E; margin-bottom: 4px; font-weight: bold;">Out of Stock</div>
-                <button class="btn btn-secondary btn-small" style="margin-top: auto; cursor: not-allowed;" disabled>Out of Stock</button>
+                <div class="product-stock-display" style="font-size: 10px; color: #E53E3E; margin-bottom: 4px; font-weight: bold;">Out of Stock</div>
+                <button class="btn btn-secondary btn-small" style="margin-top: auto; cursor: not-allowed; width: 100%;" disabled>Out of Stock</button>
             `;
         }
         grid.appendChild(card);
@@ -983,40 +1115,46 @@ function generateReceiptHtml(billData) {
 }
 
 // Dynamic Print flow triggers from checkout success or history logs
-async function handlePrintFlow(billId) {
+async function handlePrintFlow(billId, preloadedBill = null) {
     try {
-        const response = await fetch(`/api/bills/${billId}`);
-        const data = await response.json();
-
-        if (response.ok) {
-            activeBillData = data.bill;
-
-            // Generate HTML for receipt structures
-            const receiptHtml = generateReceiptHtml(activeBillData);
-            document.getElementById('receipt-container-preview').innerHTML = receiptHtml;
-
-            const printBox = document.getElementById('receipt-container');
-            if (printBox) {
-                printBox.innerHTML = receiptHtml;
+        let bill = preloadedBill;
+        if (!bill) {
+            const response = await fetch(`/api/bills/${billId}`);
+            const data = await response.json();
+            if (response.ok) {
+                bill = data.bill;
+            } else {
+                await Swal.fire("Could not load receipt details.");
+                return;
             }
+        }
 
-            // Close recent bills modal if it's open
-            if (typeof closeRecentBillsModal === 'function') {
-                closeRecentBillsModal();
+        activeBillData = bill;
+
+        // Generate HTML for receipt structures
+        const receiptHtml = generateReceiptHtml(activeBillData);
+        const previewEl = document.getElementById('receipt-container-preview');
+        if (previewEl) previewEl.innerHTML = receiptHtml;
+
+        const printBox = document.getElementById('receipt-container');
+        if (printBox) {
+            printBox.innerHTML = receiptHtml;
+        }
+
+        // Close recent bills modal if it's open
+        if (typeof closeRecentBillsModal === 'function') {
+            closeRecentBillsModal();
+        }
+
+        // Pop open the Receipt Preview modal
+        openReceiptModal();
+
+        // Check Bluetooth Autoprint triggers
+        const settings = getSettings();
+        if (settings.autoPrint) {
+            if (writeCharacteristic) {
+                await printActiveBillBluetooth();
             }
-
-            // Pop open the Receipt Preview modal
-            openReceiptModal();
-
-            // Check Bluetooth Autoprint triggers
-            const settings = getSettings();
-            if (settings.autoPrint) {
-                if (writeCharacteristic) {
-                    await printActiveBillBluetooth();
-                }
-            }
-        } else {
-            await Swal.fire("Could not load receipt details.");
         }
     } catch (err) {
         console.error(err);
@@ -1399,6 +1537,7 @@ function closeRecentBillsModal() {
 }
 
 let pendingProductData = null;
+let isConfirmingAdd = false;
 
 function openProductPopup(id, name, price, maxStock, productType, unit, imagePath) {
     pendingProductData = { id, name, price, maxStock, productType, unit };
@@ -1411,7 +1550,8 @@ function openProductPopup(id, name, price, maxStock, productType, unit, imagePat
     const imgEl = document.getElementById('popup-product-image');
     if (imgEl) {
         if (imagePath && imagePath.trim() !== '') {
-            imgEl.src = "/photos/" + imagePath;
+            const imgBase = (window.STORAGE_URL && window.STORAGE_URL.trim() !== '') ? window.STORAGE_URL : '/photos';
+            imgEl.src = imgBase + "/" + encodeURIComponent(imagePath);
             imgEl.style.display = 'block';
         } else {
             imgEl.style.display = 'none';
@@ -1452,7 +1592,7 @@ function adjustPopupQty(amount) {
 }
 
 function confirmAddToCart() {
-    if (!pendingProductData) return;
+    if (isConfirmingAdd || !pendingProductData) return;
     
     let qty = parseFloat(document.getElementById('popup-qty').value);
     if (isNaN(qty) || qty <= 0) {
@@ -1464,11 +1604,6 @@ function confirmAddToCart() {
         return;
     }
 
-    // Call the existing addToCart method
-    // Note: The existing addToCart usually adds 1, but we need to support adding 'qty'.
-    // Let's modify cart directly or call addToCart multiple times. Actually, addToCart adds 1 or updates quantity.
-    // Let's add it directly to cart array to be precise with exact quantity.
-    
     const { id, name, price, maxStock, productType, unit } = pendingProductData;
     const existingItem = cart.find(i => i.id === id);
     let newQty = existingItem ? existingItem.qty + qty : qty;
@@ -1482,12 +1617,20 @@ function confirmAddToCart() {
         return;
     }
 
-    if (existingItem) {
-        existingItem.qty = newQty;
-    } else {
-        cart.push({ id, name, price, qty, maxStock, productType, unit });
-    }
+    isConfirmingAdd = true;
+    const addBtn = document.getElementById('popup-add-btn');
+    if (addBtn) addBtn.disabled = true;
 
-    renderCart();
-    closeProductPopup();
+    try {
+        if (existingItem) {
+            existingItem.qty = newQty;
+        } else {
+            cart.push({ id, name, price, qty, maxStock, productType, unit });
+        }
+        renderCart();
+        closeProductPopup();
+    } finally {
+        isConfirmingAdd = false;
+        if (addBtn) addBtn.disabled = false;
+    }
 }

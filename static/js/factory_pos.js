@@ -429,11 +429,15 @@ function calculateTotal() {
     }
 }
 
+let isSubmittingBill = false;
 async function submitBill() {
+    if (isSubmittingBill) return;
     if (cart.length === 0) {
         await Swal.fire('Cart is empty.');
         return;
     }
+    const submitBtn = document.getElementById('submit-bill-btn');
+    const originalText = submitBtn ? submitBtn.innerHTML : '';
     const paymentMode = document.getElementById('payment-mode').value;
     const payload = {
         shopkeeper_id: ACTIVE_CASHIER_ID,
@@ -450,6 +454,12 @@ async function submitBill() {
     };
 
     try {
+        isSubmittingBill = true;
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.style.opacity = '0.6';
+            submitBtn.innerHTML = '⏳ Processing Bill...';
+        }
         const res = await fetch('/api/bills', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -460,13 +470,24 @@ async function submitBill() {
             cart = [];
             renderCart();
             document.getElementById('discount-input').value = 0;
-            await loadBillForReceipt(data.bill_id);
-            loadBillHistory();
+            await loadBillForReceipt(data.bill_id, data.bill);
+            if (data.bill) {
+                prependFactoryBillToHistory(data.bill);
+            } else {
+                loadBillHistory();
+            }
         } else {
             await Swal.fire(data.detail || 'Checkout failed.');
         }
     } catch (err) {
         await Swal.fire('Network/Server error during checkout.');
+    } finally {
+        isSubmittingBill = false;
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.style.opacity = '1';
+            submitBtn.innerHTML = originalText || 'Confirm & Print Bill';
+        }
     }
 }
 
@@ -637,43 +658,78 @@ async function cancelBillFromHistory(billId, displayNo) {
     }
 }
 
-async function loadBillForReceipt(billId) {
+async function loadBillForReceipt(billId, preloadedBill = null) {
     try {
-        const res = await fetch(`/api/bills/${billId}`);
-        const data = await res.json();
-        
-        if (res.ok) {
-            activeBillData = data.bill;
-            renderReceiptHTML(data.bill);
-            
-            const actionsContainer = document.getElementById('receipt-modal-actions');
-            if (actionsContainer) {
-                let actionsHtml = '';
-                if (data.bill.is_cancelled) {
-                    actionsHtml = `
-                        <button class="btn" style="background-color: #718096; color: white; width: 100%; padding: 10px;" onclick="printActiveBillBrowser()"> Print Void Receipt (Browser)</button>
-                    `;
-                } else {
-                    actionsHtml = `
-                        <div style="display: flex; gap: 10px; margin-bottom: 10px;">
-                            <button class="btn" style="flex: 1; background-color: #2B6CB0; color: white; padding: 10px; font-size: 14px;" onclick="printActiveBillBluetooth()"> Print (BT)</button>
-                            <button class="btn btn-secondary" style="flex: 1; background-color: #EDF2F7; border: 1px solid #CBD5E0; color: #2D3748; padding: 10px; font-size: 14px;" onclick="printActiveBillBrowser()"> Print (Web)</button>
-                        </div>
-                        <div style="display: flex; gap: 10px;">
-                            <button class="btn btn-secondary" style="flex: 1; padding: 10px; font-size: 14px;" onclick="revertBillFromHistory(${data.bill.id}, ${data.bill.bill_number || data.bill.id})"> ↩ Edit</button>
-                            <button class="btn btn-destructive" style="flex: 1; padding: 10px; font-size: 14px; background: #E53E3E; color: white; border: none;" onclick="cancelBillFromHistory(${data.bill.id}, ${data.bill.bill_number || data.bill.id})"> Cancel</button>
-                        </div>
-                    `;
-                }
-                actionsContainer.innerHTML = actionsHtml;
+        let bill = preloadedBill;
+        if (!bill) {
+            const res = await fetch(`/api/bills/${billId}`);
+            const data = await res.json();
+            if (res.ok) {
+                bill = data.bill;
+            } else {
+                await Swal.fire('Error loading receipt data.');
+                return;
             }
-            
-            closeRecentBillsModal();
-            document.getElementById('receipt-preview-modal').classList.add('active');
         }
+        
+        activeBillData = bill;
+        renderReceiptHTML(bill);
+        
+        const actionsContainer = document.getElementById('receipt-modal-actions');
+        if (actionsContainer) {
+            let actionsHtml = '';
+            if (bill.is_cancelled) {
+                actionsHtml = `
+                    <button class="btn" style="background-color: #718096; color: white; width: 100%; padding: 10px;" onclick="printActiveBillBrowser()"> Print Void Receipt (Browser)</button>
+                `;
+            } else {
+                actionsHtml = `
+                    <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                        <button class="btn" style="flex: 1; background-color: #2B6CB0; color: white; padding: 10px; font-size: 14px;" onclick="printActiveBillBluetooth()"> Print (BT)</button>
+                        <button class="btn btn-secondary" style="flex: 1; background-color: #EDF2F7; border: 1px solid #CBD5E0; color: #2D3748; padding: 10px; font-size: 14px;" onclick="printActiveBillBrowser()"> Print (Web)</button>
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button class="btn btn-secondary" style="flex: 1; padding: 10px; font-size: 14px;" onclick="revertBillFromHistory(${bill.id}, ${bill.bill_number || bill.id})"> ↩ Edit</button>
+                        <button class="btn btn-destructive" style="flex: 1; padding: 10px; font-size: 14px; background: #E53E3E; color: white; border: none;" onclick="cancelBillFromHistory(${bill.id}, ${bill.bill_number || bill.id})"> Cancel</button>
+                    </div>
+                `;
+            }
+            actionsContainer.innerHTML = actionsHtml;
+        }
+        
+        closeRecentBillsModal();
+        document.getElementById('receipt-preview-modal').classList.add('active');
     } catch (e) {
         await Swal.fire('Error loading receipt data.');
     }
+}
+
+function prependFactoryBillToHistory(bill) {
+    const container = document.getElementById('bill-history-container');
+    if (!container) return;
+    if (container.textContent.includes('No recent bills') || container.textContent.includes('Loading...')) {
+        container.innerHTML = '';
+    }
+    const card = document.createElement('div');
+    card.className = 'history-card';
+    card.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px;">
+            <div>
+                <span style="font-weight: 800; font-size: 14px; color: var(--primary);">Bill #${bill.bill_number || bill.id}</span>
+                <span style="font-size: 11px; color: #718096; margin-left: 6px;">${bill.timestamp}</span>
+            </div>
+            <div style="text-align: right;">
+                <div style="font-size: 14px; font-weight: 800; color: #2D3748;">₹${bill.final_amount.toFixed(2)}</div>
+                <div style="font-size: 10px; color: #718096; text-transform: uppercase;">${bill.payment_mode}</div>
+            </div>
+        </div>
+        <div style="display: flex; gap: 8px; margin-top: 10px;">
+            <button class="btn btn-secondary btn-small" style="flex: 1; padding: 4px 8px; font-size: 11px;" onclick="loadBillForReceipt(${bill.id})">View / Print</button>
+            <button class="btn btn-secondary btn-small" style="flex: 1; padding: 4px 8px; font-size: 11px;" onclick="revertBillFromHistory(${bill.id}, ${bill.bill_number || bill.id})">Edit</button>
+            <button class="btn btn-destructive btn-small" style="flex: 1; padding: 4px 8px; font-size: 11px;" onclick="cancelBillFromHistory(${bill.id}, ${bill.bill_number || bill.id})">Cancel</button>
+        </div>
+    `;
+    container.insertBefore(card, container.firstChild);
 }
 
 function renderReceiptHTML(bill) {
@@ -1154,7 +1210,8 @@ function openSolidPopup(id, name, price, unit, imagePath) {
     const imgEl = document.getElementById('popup-product-image');
     if (imgEl) {
         if (imagePath && imagePath.trim() !== '') {
-            imgEl.src = "/photos/" + imagePath;
+            const imgBase = (window.STORAGE_URL && window.STORAGE_URL.trim() !== '') ? window.STORAGE_URL : '/photos';
+            imgEl.src = imgBase + "/" + encodeURIComponent(imagePath);
             imgEl.style.display = 'block';
         } else {
             imgEl.style.display = 'none';
@@ -1177,7 +1234,8 @@ function openLiquidPopup(id, name, price, rate_qty, imagePath) {
     const imgEl = document.getElementById('popup-product-image');
     if (imgEl) {
         if (imagePath && imagePath.trim() !== '') {
-            imgEl.src = "/photos/" + imagePath;
+            const imgBase = (window.STORAGE_URL && window.STORAGE_URL.trim() !== '') ? window.STORAGE_URL : '/photos';
+            imgEl.src = imgBase + "/" + encodeURIComponent(imagePath);
             imgEl.style.display = 'block';
         } else {
             imgEl.style.display = 'none';
